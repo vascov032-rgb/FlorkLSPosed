@@ -1,19 +1,18 @@
 package com.flork.lsposed;
 
 import android.app.Activity;
-import android.content.Context;
-import android.graphics.Color;
-import android.graphics.PixelFormat;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.widget.Button;
+import dalvik.system.InMemoryDexClassLoader;
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -22,11 +21,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class MainHook implements IXposedHookLoadPackage {
     
-    private static Button macroButton;
     private static boolean isHolding = false;
     private static Handler handler = new Handler(Looper.getMainLooper());
     private static DataOutputStream suOutput;
-    private static boolean visible = true;
 
     private static final int KICK_X = 2047;
     private static final int KICK_Y = 585;
@@ -37,68 +34,48 @@ public class MainHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
         if (!lpparam.packageName.equals("com.alberun.mamoball")) return;
 
-        XposedBridge.log("Flork Loader: Mamoball detectado! Preparando...");
+        XposedBridge.log("Flork Loader: Mamoball detectado! Iniciando...");
 
-        // 1. Abre um shell SU persistente para não travar o celular
+        // 1. Abre o shell SU persistente
         try {
             Process suProcess = Runtime.getRuntime().exec("su");
             suOutput = new DataOutputStream(suProcess.getOutputStream());
         } catch (Exception e) {}
 
-        // 2. Hook para capturar o botão criado pelo classes9.dex
+        // 2. A MÁGICA DEFINITIVA: Hook no botão assim que o seu DEX tentar colocar o clique nele
         try {
-            XposedHelpers.findAndHookMethod("android.view.WindowManagerImpl", lpparam.classLoader, "addView", View.class, ViewGroup.LayoutParams.class, new XC_MethodHook() {
+            XposedHelpers.findAndHookMethod(Button.class, "setOnTouchListener", View.OnTouchListener.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    View v = (View) param.args[0];
-                    if (v instanceof Button) {
-                        Button b = (Button) v;
-                        if (b.getText().toString().toUpperCase().contains("KICK")) {
-                            XposedBridge.log("Flork Loader: Botao do classes9.dex capturado! Trocando evento...");
-                            macroButton = b;
-                            
-                            // Trocamos o OnTouchListener original (que chamava nativeStartMacro) pelo nosso
-                            b.setOnTouchListener(new View.OnTouchListener() {
-                                @Override
-                                public boolean onTouch(View v, MotionEvent event) {
-                                    switch (event.getAction()) {
-                                        case MotionEvent.ACTION_DOWN:
-                                            isHolding = true;
-                                            handler.post(holdRunnable);
-                                            return true;
-                                        case MotionEvent.ACTION_UP:
-                                            handler.removeCallbacks(holdRunnable);
-                                            if (isHolding) {
-                                                isHolding = false;
-                                            }
-                                            return true;
+                    // Substitui o evento de clique original do classes9.dex pelo nosso
+                    param.args[0] = new View.OnTouchListener() {
+                        @Override
+                        public boolean onTouch(View v, MotionEvent event) {
+                            switch (event.getAction()) {
+                                case MotionEvent.ACTION_DOWN:
+                                    isHolding = true;
+                                    handler.post(holdRunnable);
+                                    // Retorna false para que o DEX original ainda consiga arrastar o botão
+                                    return false; 
+                                case MotionEvent.ACTION_UP:
+                                case MotionEvent.ACTION_CANCEL:
+                                    handler.removeCallbacks(holdRunnable);
+                                    if (isHolding) {
+                                        isHolding = false;
                                     }
                                     return false;
-                                }
-                            });
+                            }
+                            return false;
                         }
-                    }
+                    };
                 }
             });
-        } catch (Throwable t) {}
+            XposedBridge.log("Flork Loader: Hook do clique ativado!");
+        } catch (Throwable t) {
+            XposedBridge.log("Erro no hook do clique: " + t.getMessage());
+        }
 
-        // 3. Hook nos toques na tela pra 4 dedos
-        try {
-            XposedHelpers.findAndHookMethod(Activity.class, "dispatchTouchEvent", MotionEvent.class, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    MotionEvent event = (MotionEvent) param.args[0];
-                    if (event != null && event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN) {
-                        if (event.getPointerCount() == 4 && macroButton != null) {
-                            visible = !visible;
-                            macroButton.setAlpha(visible ? 1f : 0f);
-                        }
-                    }
-                }
-            });
-        } catch (Throwable t) {}
-
-        // 4. Hook no onCreate para carregar a .so e o classes9.dex
+        // 3. Hook no onCreate para carregar as libs e o DEX
         XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class, new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -107,7 +84,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
                 activity.runOnUiThread(() -> {
                     try {
-                        // Copia os arquivos da pasta adm
                         Process su = Runtime.getRuntime().exec("su");
                         DataOutputStream os = new DataOutputStream(su.getOutputStream());
                         os.writeBytes("mkdir -p /data/data/com.alberun.mamoball/files\n");
@@ -120,28 +96,25 @@ public class MainHook implements IXposedHookLoadPackage {
                         os.close();
                         su.waitFor();
 
-                        // Carrega libs
                         System.load("/data/data/com.alberun.mamoball/files/libc++_shared.so");
                         System.load("/data/data/com.alberun.mamoball/files/libflork_android.so");
 
-                        // Carrega o DEX
-                        java.io.File dexFile = new java.io.File("/data/data/com.alberun.mamoball/files/classes9.dex");
+                        File dexFile = new File("/data/data/com.alberun.mamoball/files/classes9.dex");
                         byte[] dexBytes = new byte[(int) dexFile.length()];
-                        java.io.FileInputStream fis = new java.io.FileInputStream(dexFile);
+                        FileInputStream fis = new FileInputStream(dexFile);
                         fis.read(dexBytes);
                         fis.close();
 
-                        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(dexBytes);
+                        ByteBuffer bb = ByteBuffer.wrap(dexBytes);
                         ClassLoader cl = activity.getClassLoader();
-                        dalvik.system.InMemoryDexClassLoader dexLoader = new dalvik.system.InMemoryDexClassLoader(bb, cl);
+                        InMemoryDexClassLoader dexLoader = new InMemoryDexClassLoader(bb, cl);
 
                         Class<?> florkClass = dexLoader.loadClass("com.flork.macro.FlorkOverlay");
                         
-                        // Chama o install do classes9.dex pra criar o botão
-                        java.lang.reflect.Method installMethod = florkClass.getMethod("install", Activity.class, String.class);
+                        Method installMethod = florkClass.getMethod("install", Activity.class, String.class);
                         installMethod.invoke(null, activity, "FlorkMacroBridge");
                         
-                        XposedBridge.log("Flork Loader: Botao do DEX criado.");
+                        XposedBridge.log("Flork Loader: Botao injetado com SUCESSO!");
                     } catch (Throwable e) {
                         XposedBridge.log("Erro: " + e.getMessage());
                     }
@@ -155,7 +128,7 @@ public class MainHook implements IXposedHookLoadPackage {
         public void run() {
             if (isHolding) {
                 executeTap();
-                handler.postDelayed(this, 1); // 1ms de delay
+                handler.postDelayed(this, 1); // 1ms de loop
             }
         }
     };
