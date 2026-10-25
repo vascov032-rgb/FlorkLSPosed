@@ -1,19 +1,13 @@
 package com.flork.lsposed;
 
 import android.app.Activity;
-import android.content.Context;
-import android.graphics.Color;
-import android.graphics.PixelFormat;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.view.Gravity;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowManager;
-import android.widget.Button;
+import dalvik.system.InMemoryDexClassLoader;
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -21,11 +15,8 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class MainHook implements IXposedHookLoadPackage {
-    private static Button macroButton;
-    private static boolean isHolding = false;
-    private static Handler handler = new Handler(Looper.getMainLooper());
-    private static boolean visible = true;
-
+    
+    // Coordenadas exatas que você passou
     private static final int KICK_X = 2047;
     private static final int KICK_Y = 585;
     private static final int POWER_X = 2383;
@@ -34,142 +25,88 @@ public class MainHook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
         if (!lpparam.packageName.equals("com.alberun.mamoball")) return;
-        XposedBridge.log("Flork LSPosed: Mamoball detectado!");
 
-        // 1. Dá a permissão pro botão aparecer (roda em background)
-        new Thread(() -> {
-            try {
-                Process su = Runtime.getRuntime().exec("su");
-                DataOutputStream os = new DataOutputStream(su.getOutputStream());
-                os.writeBytes("appops set com.alberun.mamoball SYSTEM_ALERT_WINDOW allow\n");
-                os.flush();
-                os.close();
-                su.waitFor();
-            } catch (Exception e) {}
-        }).start();
+        XposedBridge.log("Flork Loader: Mamoball detectado! Copiando arquivos...");
 
-        // 2. Hook nos toques pra ver os 4 dedos
+        // 1. Copia os arquivos originais da pasta adm pra pasta do jogo
         try {
-            XposedHelpers.findAndHookMethod(Activity.class, "dispatchTouchEvent", MotionEvent.class, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    MotionEvent event = (MotionEvent) param.args[0];
-                    if (event != null && event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN) {
-                        if (event.getPointerCount() == 4) {
-                            visible = !visible;
-                            if (macroButton != null) {
-                                ((Activity) param.thisObject).runOnUiThread(() -> macroButton.setAlpha(visible ? 1f : 0f));
-                            }
-                        }
-                    }
-                }
-            });
-        } catch (Throwable t) {}
-
-        // 3. Cria o botão na tela
-        try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    final Activity activity = (Activity) param.thisObject;
-                    if (activity == null || macroButton != null) return;
-
-                    activity.runOnUiThread(() -> {
-                        try {
-                            WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
-                            macroButton = new Button(activity);
-                            macroButton.setText("KICK+POWER");
-                            macroButton.setTextColor(Color.WHITE);
-                            macroButton.setTextSize(10);
-
-                            GradientDrawable bg = new GradientDrawable();
-                            bg.setShape(GradientDrawable.OVAL);
-                            bg.setColor(Color.parseColor("#8000FF00"));
-                            bg.setStroke(3, Color.GREEN);
-                            macroButton.setBackground(bg);
-
-                            WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                                    250, 250,
-                                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                                    PixelFormat.TRANSLUCENT);
-
-                            params.gravity = Gravity.TOP | Gravity.LEFT;
-                            params.x = 200;
-                            params.y = 400;
-
-                            macroButton.setOnTouchListener(new View.OnTouchListener() {
-                                float initX, initY, initTouchX, initTouchY;
-                                boolean isDragging = false;
-                                @Override
-                                public boolean onTouch(View v, MotionEvent event) {
-                                    switch (event.getAction()) {
-                                        case MotionEvent.ACTION_DOWN:
-                                            initX = params.x; initY = params.y;
-                                            initTouchX = event.getRawX(); initTouchY = event.getRawY();
-                                            isHolding = true;
-                                            isDragging = false;
-                                            handler.post(holdRunnable);
-                                            return true;
-                                        case MotionEvent.ACTION_MOVE:
-                                            float dx = event.getRawX() - initTouchX;
-                                            float dy = event.getRawY() - initTouchY;
-                                            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-                                                isDragging = true;
-                                                isHolding = false;
-                                                handler.removeCallbacks(holdRunnable);
-                                            }
-                                            params.x = (int) (initX + dx);
-                                            params.y = (int) (initY + dy);
-                                            wm.updateViewLayout(macroButton, params);
-                                            return true;
-                                        case MotionEvent.ACTION_UP:
-                                            handler.removeCallbacks(holdRunnable);
-                                            if (isHolding) {
-                                                isHolding = false;
-                                                if (!isDragging) executeTap();
-                                            }
-                                            return true;
-                                    }
-                                    return false;
-                                }
-                            });
-
-                            wm.addView(macroButton, params);
-                            XposedBridge.log("Flork LSPosed: Botao adicionado com sucesso!");
-                        } catch (Exception e) {
-                            XposedBridge.log("Erro ao criar botao: " + e.getMessage());
-                        }
-                    });
-                }
-            });
-        } catch (Throwable t) {}
-    }
-
-    private static Runnable holdRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (isHolding) {
-                executeTap();
-                handler.postDelayed(this, 1);
-            }
+            Process su = Runtime.getRuntime().exec("su");
+            DataOutputStream os = new DataOutputStream(su.getOutputStream());
+            os.writeBytes("mkdir -p /data/data/com.alberun.mamoball/files\n");
+            os.writeBytes("cp /sdcard/Download/adm/libc++_shared.so /data/data/com.alberun.mamoball/files/\n");
+            os.writeBytes("cp /sdcard/Download/adm/libflork_android.so /data/data/com.alberun.mamoball/files/\n");
+            os.writeBytes("cp /sdcard/Download/adm/classes9.dex /data/data/com.alberun.mamoball/files/\n");
+            os.writeBytes("cp /sdcard/Download/adm/AndroidManifest.xml /data/data/com.alberun.mamoball/files/\n");
+            os.writeBytes("appops set com.alberun.mamoball SYSTEM_ALERT_WINDOW allow\n");
+            os.writeBytes("chmod 777 /data/data/com.alberun.mamoball/files/*\n");
+            os.flush();
+            os.close();
+            su.waitFor();
+            XposedBridge.log("Flork Loader: Arquivos copiados e permissão dada!");
+        } catch (Exception e) {
+            XposedBridge.log("Flork Loader: Erro no root: " + e.getMessage());
         }
-    };
 
-    private static void executeTap() {
-        new Thread(() -> {
-            try {
-                Process su = Runtime.getRuntime().exec("su");
-                DataOutputStream os = new DataOutputStream(su.getOutputStream());
-                // Comando de toque simultâneo
-                os.writeBytes("input tap " + KICK_X + " " + KICK_Y + "\n");
-                os.writeBytes("input tap " + POWER_X + " " + POWER_Y + "\n");
-                os.flush();
-                os.close();
-                su.waitFor();
-            } catch (Exception e) {
-                XposedBridge.log("Erro no toque: " + e.getMessage());
+        // 2. Hook na tela do jogo pra carregar as libs e o DEX
+        XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class, new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                Activity activity = (Activity) param.thisObject;
+                if (activity == null) return;
+
+                try {
+                    // Carrega as bibliotecas nativas
+                    System.load("/data/data/com.alberun.mamoball/files/libc++_shared.so");
+                    System.load("/data/data/com.alberun.mamoball/files/libflork_android.so");
+                    XposedBridge.log("Flork Loader: Bibliotecas carregadas.");
+
+                    // Carrega o seu DEX
+                    File dexFile = new File("/data/data/com.alberun.mamoball/files/classes9.dex");
+                    byte[] dexBytes = new byte[(int) dexFile.length()];
+                    FileInputStream fis = new FileInputStream(dexFile);
+                    fis.read(dexBytes);
+                    fis.close();
+
+                    ByteBuffer bb = ByteBuffer.wrap(dexBytes);
+                    ClassLoader cl = activity.getClassLoader();
+                    InMemoryDexClassLoader dexLoader = new InMemoryDexClassLoader(bb, cl);
+
+                    Class<?> florkClass = dexLoader.loadClass("com.flork.macro.FlorkOverlay");
+
+                    // 3. A MÁGICA: Intercepta o nativeStartMacro do seu DEX
+                    try {
+                        XposedHelpers.findAndHookMethod(florkClass, "nativeStartMacro", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                XposedBridge.log("Flork Loader: Botao clicado! Disparando input tap...");
+                                new Thread(() -> {
+                                    try {
+                                        Process su = Runtime.getRuntime().exec("su");
+                                        DataOutputStream os = new DataOutputStream(su.getOutputStream());
+                                        // Dispara o Kick e o Power Kick
+                                        os.writeBytes("input tap " + KICK_X + " " + KICK_Y + "\n");
+                                        os.writeBytes("input tap " + POWER_X + " " + POWER_Y + "\n");
+                                        os.flush();
+                                        os.close();
+                                        su.waitFor();
+                                    } catch (Exception e) {}
+                                }).start();
+                            }
+                        });
+                        XposedBridge.log("Flork Loader: nativeStartMacro hookada com sucesso!");
+                    } catch (Throwable t) {
+                        XposedBridge.log("Flork Loader: Erro ao hookar nativeStartMacro: " + t.getMessage());
+                    }
+
+                    // 4. Chama o install() do seu DEX pra criar o botão na tela
+                    Method installMethod = florkClass.getMethod("install", Activity.class, String.class);
+                    installMethod.invoke(null, activity, "FlorkMacroBridge");
+                    XposedBridge.log("Flork Loader: Botao injetado com SUCESSO!");
+
+                } catch (Throwable t) {
+                    XposedBridge.log("Flork Loader: Erro DEX: " + t.getMessage());
+                }
             }
-        }).start();
+        });
     }
 }
